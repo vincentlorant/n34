@@ -1,0 +1,13 @@
+baseURL = 'https://vincentlorant.github.io/n34'
+languageCode = 'en-us'
+title = 'No. 34'
+theme = 'PaperMod'
+
+[[menu.main]]
+identifier = 'categories'
+name = 'Categories'
+url = '/categories/'
+weight = 10
+
+[params]
+  ShowTaxonomies = true
