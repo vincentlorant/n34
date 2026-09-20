@@ -11,3 +11,8 @@ weight = 10
 
 [params]
   ShowTaxonomies = true
+
+
+[caches]
+  [caches.images]
+    dir = ':cacheDir/images'
