@@ -194,7 +194,7 @@ Median solve times on the RTX 3080, three seeds per width:
 | 2048 | 4,194,304 | 59,263ms | 7,853ms | 1,032.7ms | 7.6x |
 | 4096 | 16,777,216 | ~458,869ms | 88,630ms | 3,894ms | 22.8x |
 
-Small graphs lose on the GPU, no surprise, the CPU finishes before the upload even lands, and at 128 they're tied. From 256 up the picture inverts: at 2048 Jacobi is ~7.5x faster than the CPU and the frontier version ~57x, which puts it 7.6x over Jacobi, and at 4096 that widens to ~23x. The gap grows with graph size because the frontier version's work scales with the frontier, not the graph. Jacobi is still re-reading every edge of a 16M-node graph long after the interesting work moved elsewhere, with shuffled ids so no locality to lean on. The atomics sound expensive but they're nothing compared to touching all that memory.
+Small graphs lose on the GPU, no surprise: the CPU finishes before the upload might even lands. From 256 up the picture inverts. At 2048 Jacobi is ~7.5x faster than the CPU, the frontier version ~57x, which makes it 7.6x faster than Jacobi. At 4096 it reaches ~23x. The gap grows with graph size because the frontier version's work scales with the frontier, not the graph: Jacobi is still re-reading every edge of a 16M-node graph long after the interesting work moved elsewhere, and with shuffled ids there is no locality to lean on. The atomics sound expensive but they're nothing compared to touching all that memory.
 
 ## Note
 
