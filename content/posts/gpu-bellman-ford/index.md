@@ -1,5 +1,5 @@
 +++
-date = '2026-10-25T14:17:30-04:00'
+date = '2025-10-25T14:17:30-04:00'
 draft = false
 title = 'Bellman-Ford on GPU'
 tags = ['gpu', 'wgpu', 'rust', 'graph']
@@ -9,19 +9,19 @@ TocOpen = true
 cover = { image = 'thumbnail.jpg' }
 +++
 
-## Intro
+## Context
 
-I was recently looking at a problem where a graph-based solution seemed like a fit, so before committing to anything I wanted to poke at it through a toy project. I picked Bellman-Ford as a test bed because unlike Dijkstra with its priority queue, BF is more GPU-friendly.
+Recently looking at a problem where a graph-based solution seemed like a fit, I wanted to poke at it through a toy project before committing to anything. Picked Bellman-Ford as a test bed because unlike Dijkstra and its priority queue approach, BF is more GPU-friendly.
 
-Everything is Rust with [wgpu](https://wgpu.rs), WGSL compute shaders, running on my RTX 3080 over Vulkan. I tested three implementations:
+Using Rust with [wgpu](https://wgpu.rs) to run wgsl compute shaders on my RTX 3080, I tested three implementations:
 
-1. Bellman-Ford on the CPU, mostly to have something to check the GPU against
+1. CPU baseline for Bellman-Ford
 2. a pull-based version on the GPU, Jacobi style
-3. a push-based version on the GPU, with atomics and a frontier so it stops relaxing the whole graph every pass
+3. a push-based version on the GPU with a frontier approach so it stops relaxing the whole graph every pass
 
 ## Graph data layout
 
-Before anything could run on the GPU, the data layout had to be thought through. A common approach is CSR (Compressed Sparse Row, used to compress matrices with sparse non-zero values), which is pretty straightforward and made me think of a prefix sum of the node degrees.
+The graph data layout, to be gpu-friendly, follow a common approach that can be seen for sparse matrix called CSR (Compressed Sparse Row, used to compress matrices with sparse non-zero values). It made me think of a prefix sum of the node degrees.
 
 ```rust
 // row_ptrs[i]..row_ptrs[i+1] tells you where node i's edges live
@@ -38,7 +38,7 @@ for i in 1..=n_nodes {
 
 ## The CPU baseline
 
-Relaxation happens in place, Gauss-Seidel style: an update is immediately visible to every node visited after it in the same sweep, so improvements cascade down the sweep instead of waiting a full pass like the Jacobi kernel. Like the pull version, it expects the graph in reversed form.
+Relaxation happens in place, an update is immediately visible to every node visited after it in the same sweep, so improvements cascade down the sweep instead of waiting a full pass like the Jacobi kernel. It expects the graph in reversed form.
 
 ```rust
 pub fn bellman_ford(graph: &CsrGraph, source: usize) -> Vec<f32> {
@@ -69,7 +69,7 @@ pub fn bellman_ford(graph: &CsrGraph, source: usize) -> Vec<f32> {
 
 ## Pull on the GPU, Jacobi style
 
-Each invocation owns one node `v`, reads the old distances of its in-neighbors, writes its new distance into a second buffer. Reads and writes never mix: everything reads `dist_old`, everything writes `dist_new`. No synchronization needed inside a sweep, the cost is the ping-ponging between the two buffers. Since every node looks at what flows *into* it, this one wants the graph in reversed form.
+Each invocation owns one node `v`, reads the old distances of its in-neighbors, writes its new distance into a second buffer. Reads and writes never mix: everything reads `dist_old`, everything writes `dist_new`. No synchronization needed inside a sweep because of the ping-ponging between the two buffers. Since every node looks at what flows *into* it, this one wants the graph in reversed form.
 
 ```rust
 // Bindings: row_ptrs, neighbors, weights, dist_old (read-only),
@@ -94,15 +94,15 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 }
 ```
 
-What ended up mattering more than I expected is the host loop. One pass advances the frontier by exactly one hop, so the number of passes is structural: on my benchmark grid (`w x w`) the source needs about `2 * w` passes, and the sweep re-reads every edge of the graph the whole way. The work near the source is done after a couple of passes, but the sweep can't know that.
+What ended up mattering more than I expected is the host loop. One pass advances the frontier by exactly one hop, and the sweep re-reads every edge of the graph the whole way. The work near the source is done after a couple of passes, but the sweep can't know that. It's a lot of wasteful computations.
 
-The other annoyance is that checking convergence means a sync: reading the `changed` flag drains the queue back to the host, exactly the kind of stall you write a GPU version to avoid. I batch `check_every` passes between checks, which cuts the syncs by that factor at the cost of overshooting convergence by a few passes. Reasonable trade.
+Also, checking convergence means a sync: reading the `changed` flag drains the queue back to the host, exactly the kind of stall you want a GPU workflow to avoid. I batch `check_every` passes between checks, which cuts the syncs by that factor at the cost of overshooting convergence by a few passes. Reasonable trade, and it makes it a little faster, but the bottleneck is clearly relaxing all the graph each sweep.
 
 ## Push on the GPU, atomics and a frontier
 
-The Jacobi version had this bitter taste of relaxing all the graph nodes every pass even when only a handful of them actually improved. So the second version flips the edge directions: a node pushes improvements along its out-edges, in place, into the single distance buffer.
+The Jacobi version had this bitter taste of wasteful computation. So the second version flips the edge directions: a node pushes improvements along its out-edges, in place, into a single distance buffer.
 
-Two things to be careful about. First, relaxes now race with each other, so updates have to go through atomics, and WGSL has no `f32` atomics.. it would have been too sweet. Distances are stored as raw bit patterns and compared through an order-preserving key, which is enough to build a float `min` out of integer atomics.
+Two things to be careful about. First, threads now race with each other, so updates have to go through atomics, and WGSL has no `f32` atomics.. it would have been too sweet. Distances are stored as raw bit patterns and compared through an order-preserving key, which is a nice trick for comparing the values with integer atomics.
 
 ```wgsl
 // WGSL only supports atomic operations on integers, so we need to convert f32 to u32
@@ -119,7 +119,7 @@ fn sort_key(b: u32) -> u32 {
 }
 ```
 
-Second, with everyone relaxing in place there's no clean "this pass is done" moment. So the frontier is tracked implicitly: each node remembers the distance it last relaxed from (`last_relaxed`) and skips the pass unless its distance improved since. Nodes that didn't change do almost nothing, one atomic load and out. And because updates are visible immediately, one pass can cascade an improvement through several hops, something the Jacobi version could never do.
+Second, with everyone relaxing in place there's no clean "this pass is done" moment. So the frontier is tracked implicitly: each node remembers the distance it last relaxed from (`last_relaxed`) and skips the pass unless its distance improved since. Nodes that didn't change do almost nothing, one atomic load and out. And because updates are visible immediately, one pass can cascade an improvement through several hops, something the Jacobi version could never do. It's not deterministic though because the thread order cannot be predicted.
 
 ```wgsl
 @compute @workgroup_size(64)
@@ -162,9 +162,9 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 
 ## Benchmarks
 
-Same graph every time: a `w x w` grid with bidirectional edges, deterministic pseudo-costs, a random source, `check_every = 32`. Each width runs three times with different shuffle seeds; the plot shows the median with the min-max spread as a band. The CPU run is skipped at the largest width and extrapolated, it would take longer than my patience.
+Same graph every time: a `w x w` grid with bidirectional edges, deterministic pseudo-costs, a random source, `check_every = 32`. Each width runs three times with different shuffle seeds; the plot shows the median with the min-max spread as a band. The CPU run is skipped at the largest width and extrapolated, it would take longer than what I can handle.
 
-I started with a row-major grid as the toy graph, which hands every algorithm a gift: a node's neighbors are always `id ± 1` and `id ± w`, so the CPU visit order and the GPU access patterns both get suspiciously good locality. So before trusting anything, I relabeled the nodes with a Fisher-Yates shuffle:
+I started with a row-major grid as the toy graph, which hands every algorithm a gift: a node's neighbors are always `id ± 1` and `id ± w`, so the CPU visit order and the GPU access patterns both got suspiciously good locality. So before trusting anything, I relabeled the nodes with a Fisher-Yates shuffle.
 
 ```rust
 fn shuffled_ids(n: usize, state: &mut u64) -> Vec<usize> {
@@ -194,8 +194,11 @@ Median solve times on the RTX 3080, three seeds per width:
 | 2048 | 4,194,304 | 59,263ms | 7,853ms | 1,032.7ms | 7.6x |
 | 4096 | 16,777,216 | ~458,869ms | 88,630ms | 3,894ms | 22.8x |
 
-Small graphs lose on the GPU, no surprise: the CPU finishes before the upload even lands. Up to 256 both GPU versions cost about the same, at that size the relaxation is nothing and the time goes into fixed per-pass costs like dispatching and syncing, not real work. From 512 up the passes turn memory-bound: an edge is just a min and an add, nowhere near enough arithmetic to hide streaming the graph through VRAM, so what matters is how much data each version moves. Jacobi re-reads the whole graph every pass. The frontier version still touches every node, one atomic load on `dist` and one on `last_relaxed` to know whether to bail, but it never streams the edge arrays of a node that didn't improve. With shuffled ids there is no locality to lean on, which increase the gap: at 2048 Jacobi is ~7.5x faster than the CPU and the frontier version ~57x, 7.6x over Jacobi, reaching ~23x at 4096. The atomics sound expensive but they're nothing compared to touching all that memory.
+* Small graphs lose on the GPU, no surprise, the CPU finishes while the GPU is still creating buffer, dispatching kernels, downloading the result.. 
+* Up to 256 both GPU versions cost about the same, at that size the relaxation is nothing and the time goes into fixed per-pass costs like dispatching and syncing, not real work. 
+* From 512 up the passes turn memory-bound: an edge is just a min and an add, nowhere near enough arithmetic to hide streaming the graph through VRAM, so what matters is how much data each version moves. Jacobi re-reads the whole graph and edges every pass. The frontier version still touches every node, one atomic load on `dist` and one on `last_relaxed` to know whether to bail, but it never streams the edge arrays of a node that didn't improve. 
+* With shuffled ids there is no locality to lean on, which increase the gap: at 2048 Jacobi is ~7.5x faster than the CPU and the frontier version ~57x, 7.6x over Jacobi, reaching ~23x at 4096. The atomics sound expensive but they're nothing compared to touching all that memory.
 
 ## Note
 
-The `changed`-flag polling is the lazy way to detect convergence and I know it. A real frontier implementation would compact the frontier into an explicit worklist so the dispatch shrinks with the work. Here every pass still launches one invocation per node and most just bail on the first check. Next thing to try if I come back to this.
+The `changed` flag polling is the lazy way to detect convergence I know. A real frontier implementation might compact the frontier into an explicit worklist so the dispatch shrinks with the work. Here every pass still launches one invocation per node and most just bail on the first check. Next thing to try if I come back to this.
