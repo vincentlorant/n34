@@ -3,6 +3,7 @@ date = '2024-02-19T14:17:30-04:00'
 draft = false
 title = 'Mean Curvature'
 tags = ['gpu', 'cuda', 'geometry']
+categories = ['gpu', 'project']
 summary = 'Notes from implementing the mean curvature algorithm from the Meyer et al. paper on the GPU.'
 showToc = true
 TocOpen = true

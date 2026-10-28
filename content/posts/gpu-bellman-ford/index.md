@@ -3,6 +3,7 @@ date = '2025-10-25T14:17:30-04:00'
 draft = false
 title = 'Bellman-Ford on GPU'
 tags = ['gpu', 'wgpu', 'rust', 'graph']
+categories = ['gpu', 'project']
 summary = 'Notes from testing a graph-based approach to a problem: CSR layout, a Jacobi-style pull Bellman-Ford, and a push version with atomics and a frontier.'
 showToc = true
 TocOpen = true
